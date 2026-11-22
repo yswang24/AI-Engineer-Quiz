@@ -15,7 +15,7 @@ from typing import Optional
 from fastapi import (Body, Depends, FastAPI, File, Form, HTTPException, Query,
                      Request, UploadFile)
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
-                               PlainTextResponse, Response)
+                               PlainTextResponse, Response, StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__, export, ingest, search, standards, storage, thumbnails
@@ -242,9 +242,8 @@ def export_assets_csv(
     _validate_asset_query(sort=sort, tag=tag, include_tags=include_tags,
                           exclude_tags=exclude_tags, collection_id=collection_id)
     filters = _asset_filters(q, media_type, tag, include_tags, exclude_tags, collection_id, sort)
-    rows, _ = search.fetch_rows(filters, limit=None)
-    return Response(
-        content=export.build_csv(rows),
+    return StreamingResponse(
+        export.iter_csv(search.iter_rows(filters)),
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{export.download_filename()}"'},
     )

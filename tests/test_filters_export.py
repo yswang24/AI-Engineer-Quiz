@@ -40,6 +40,7 @@ db._local.conn = None
 
 import generate_fixture  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from keepstack import search  # noqa: E402
 from keepstack.app import app  # noqa: E402
 
 EXPECTED = generate_fixture.EXPECTED_MATCHES
@@ -155,6 +156,15 @@ def test_sorting_and_stable_pagination(client, collection_ids):
     punctuation = client.get("/api/assets", params=query({**filters, "q": "!!! \"\" ，"}, limit=200))
     assert punctuation.status_code == 200
     assert punctuation.json()["total"] == len(EXPECTED)
+
+
+def test_streaming_rows_and_tags_are_chunked(client, collection_ids, monkeypatch):
+    filters = {**BASE, "collection_id": collection_ids["campaigns"], "sort": "oldest"}
+    monkeypatch.setattr(search, "TAG_BATCH", 3)
+    rows = list(search.iter_rows(filters, batch_size=3))
+    assert [r["uuid"] for r in rows] == EXPECTED
+    assert all("tags" in r for r in rows)
+    assert rows[0]["tags"] == ["approved", "campaign"]
 
 
 def test_csv_export_matches_all_pages_and_escapes_fields(client, collection_ids):

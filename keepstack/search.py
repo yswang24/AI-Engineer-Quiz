@@ -17,7 +17,8 @@ with identical created_at in a different order between the count/page queries
 from __future__ import annotations
 
 import re
-from typing import Iterable, Optional
+from collections import defaultdict
+from typing import Iterable, Iterator, Optional
 
 from . import ai
 from .db import get_conn
@@ -119,11 +120,33 @@ def order_by(sort: str) -> str:
     return SORTS.get(sort, SORTS[DEFAULT_SORT])
 
 
-def fetch_rows(filters: dict, limit: Optional[int] = None, offset: int = 0) -> tuple[list[dict], int]:
+TAG_BATCH = 400  # stay well below SQLite's per-query variable limit
+
+
+def tags_by_asset(asset_ids: list[int]) -> dict[int, list[str]]:
+    """Fetch tag names for a batch of asset ids, chunked and order-stable."""
+    out: dict[int, list[str]] = defaultdict(list)
+    for start in range(0, len(asset_ids), TAG_BATCH):
+        chunk = asset_ids[start:start + TAG_BATCH]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = get_conn().execute(
+            f"SELECT at.asset_id, t.name FROM asset_tags at "
+            f"JOIN tags t ON t.id = at.tag_id "
+            f"WHERE at.asset_id IN ({placeholders})",
+            chunk,
+        ).fetchall()
+        for row in rows:
+            out[row["asset_id"]].append(row["name"])
+    return {aid: sorted(names) for aid, names in out.items()}
+
+
+def fetch_rows(filters: dict, limit: Optional[int] = None, offset: int = 0,
+               with_tags: bool = False) -> tuple[list[dict], int]:
     """Fetch matching asset rows and the full match count.
 
-    ``limit=None`` means no LIMIT (used by CSV export). Every query reads the
-    same filters, so list and export agree as long as the data does not change.
+    ``limit=None`` means no LIMIT. Every query reads the same filters, so list
+    and export agree as long as the data does not change. ``with_tags`` is
+    opt-in for the list cards and streaming CSV, which both need tag names.
     """
     conn = get_conn()
     where_sql, params = build_where(**{k: v for k, v in filters.items() if k != "sort"})
@@ -135,7 +158,25 @@ def fetch_rows(filters: dict, limit: Optional[int] = None, offset: int = 0) -> t
     if limit is not None:
         sql += " LIMIT ? OFFSET ?"
         query_params.extend([limit, offset])
-    return [dict(r) for r in conn.execute(sql, query_params).fetchall()], total
+    rows = [dict(r) for r in conn.execute(sql, query_params).fetchall()]
+    if with_tags:
+        tags = tags_by_asset([r["id"] for r in rows])
+        for row in rows:
+            row["tags"] = tags.get(row["id"], [])
+    return rows, total
+
+
+def iter_rows(filters: dict, batch_size: int = 500) -> Iterator[dict]:
+    """Yield all matching rows in batches instead of materialising them all."""
+    offset = 0
+    while True:
+        rows, total = fetch_rows(filters, limit=batch_size, offset=offset, with_tags=True)
+        if not rows:
+            return
+        yield from rows
+        offset += len(rows)
+        if offset >= total:
+            return
 
 
 def search(
@@ -163,7 +204,7 @@ def search(
     filters = dict(q=q, media_type=media_type, tag=tag, include_tags=include_tags,
                    exclude_tags=exclude_tags, collection_id=collection_id,
                    status=status, sort=sort)
-    rows, total = fetch_rows(filters, limit=limit, offset=offset)
+    rows, total = fetch_rows(filters, limit=limit, offset=offset, with_tags=True)
     return {
         "total": total,
         "items": [_card(r) for r in rows],
@@ -254,4 +295,5 @@ def _card(a: dict) -> dict:
         "alt_text": a["alt_text"],
         "status": a["status"],
         "created_at": a["created_at"],
+        "tags": a.get("tags", []),
     }
