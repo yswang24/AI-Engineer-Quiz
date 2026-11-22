@@ -1,6 +1,8 @@
 /* Keepstack single-page client. Vanilla JS, no build step. */
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const { splitTags, queryParams } = KeepstackFilters;
+const query = (withPage = true) => queryParams(state, withPage);
 const state = {
   token: localStorage.getItem("keepstack_token"), user: null,
   q: "", media: null, collection: null,
@@ -65,26 +67,6 @@ $$(".nav-item").forEach(btn => btn.addEventListener("click", () => {
 
 // ---------- library / combined filters ----------
 let searchTimer;
-
-function splitTags(raw) {
-  return (raw || "").split(/[,，]/).map(s => s.trim().toLowerCase()).filter(Boolean)
-    .filter((v, i, a) => a.indexOf(v) === i);
-}
-
-function queryParams(withPage = true) {
-  const p = new URLSearchParams();
-  if (state.q.trim()) p.set("q", state.q.trim());
-  if (state.media) p.set("media_type", state.media);
-  if (state.collection) p.set("collection_id", state.collection);
-  state.includeTags.forEach(t => p.append("include_tags", t));
-  state.excludeTags.forEach(t => p.append("exclude_tags", t));
-  p.set("sort", state.sort);
-  if (withPage) {
-    p.set("limit", String(state.limit));
-    p.set("offset", String(state.offset));
-  }
-  return p;
-}
 
 function syncFilterControls() {
   $("#search").value = state.q;
@@ -164,7 +146,7 @@ async function loadCollections() {
 async function loadLibrary() {
   const seq = ++state.requestSeq;
   try {
-    const data = await api("/api/assets?" + queryParams().toString());
+    const data = await api("/api/assets?" + query().toString());
     if (seq !== state.requestSeq) return;  // a newer filter change won
     state.total = data.total;
     if (state.offset > 0 && state.offset >= Math.max(data.total, 1)) {
@@ -255,7 +237,7 @@ async function exportCsv() {
   const label = btn.textContent;
   btn.disabled = true; btn.textContent = "Preparing...";
   try {
-    const res = await fetch("/api/assets/export.csv?" + queryParams(false).toString(), {
+    const res = await fetch("/api/assets/export.csv?" + query(false).toString(), {
       headers: state.token ? { Authorization: "Bearer " + state.token } : {},
     });
     if (res.status === 401) { logout(); throw new Error("unauthorised"); }
