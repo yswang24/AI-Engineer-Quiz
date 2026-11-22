@@ -19,3 +19,11 @@ def test_web_filter_helpers():
         cwd=REPO, capture_output=True, text=True, timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_web_source_contract():
+    """Guard the two UI behaviours that have no DOM test harness yet."""
+    js = (REPO / "web" / "app.js").read_text(encoding="utf-8")
+    assert "a.tags" in js
+    assert '$("#page-prev").disabled = true' in js
+    assert '$("#page-next").disabled = true' in js

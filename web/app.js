@@ -169,6 +169,8 @@ async function loadLibrary() {
     $("#empty").textContent = "加载失败：" + err.message;
     $("#empty").classList.remove("hidden");
     $("#page-info").textContent = "Load failed";
+    $("#page-prev").disabled = true;
+    $("#page-next").disabled = true;
     toast("Failed to load results: " + err.message, "err");
   }
 }
@@ -194,6 +196,7 @@ function renderGrid(items, total) {
         <span class="title" title="${esc(a.title)}">${esc(a.title)}</span>
         <span class="sub"><span class="badge">${a.media_type}</span><span>${fmtBytes(a.size)}</span></span>
         <span class="sub"><span>Created</span><span>${esc((a.created_at || "").slice(0, 10))}</span></span>
+        <span class="card-tags">${(a.tags || []).map(t => `<span class="tag mini">${esc(t)}</span>`).join("")}</span>
       </div>
     </div>`).join("");
   $$("#grid .card").forEach(c => c.addEventListener("click", () => openAsset(c.dataset.uuid)));
