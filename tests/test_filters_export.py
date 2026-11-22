@@ -83,6 +83,12 @@ def client(collection_ids):
         yield c
 
 
+def test_supporting_indexes_exist(collection_ids):
+    names = {r["name"] for r in db.get_conn().execute(
+        "SELECT name FROM sqlite_master WHERE type = 'index'")}
+    assert {"idx_tags_lower_name", "idx_asset_tags_tag", "idx_assets_created_jd"} <= names
+
+
 def test_combined_filters_include_exclude_collection_and_media(client, collection_ids):
     filters = {**BASE, "collection_id": collection_ids["campaigns"]}
     r = client.get("/api/assets", params=query(filters, sort="oldest", limit=200))
