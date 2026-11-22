@@ -89,8 +89,12 @@ def build_where(
 
     keyword = (q or "").strip()
     if keyword:
-        clauses.append(_FTS_SQL)
-        params.append(_fts_query(keyword))
+        # Punctuation-only input sanitises to no terms. Treat it like blank
+        # input instead of issuing an empty MATCH, which FTS5 rejects.
+        fts = _fts_query(keyword)
+        if fts:
+            clauses.append(_FTS_SQL)
+            params.append(fts)
     if media_type:
         clauses.append("a.media_type = ?")
         params.append(media_type)

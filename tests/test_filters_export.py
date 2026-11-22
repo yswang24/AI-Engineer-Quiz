@@ -141,6 +141,10 @@ def test_sorting_and_stable_pagination(client, collection_ids):
     assert [i["uuid"] for i in special.json()["items"]] == ["fixture-013"]
     blank = client.get("/api/assets", params=query({**filters, "q": "   "}, limit=200))
     assert blank.json()["total"] == len(EXPECTED)
+    # Punctuation-only input sanitises to zero FTS terms: must not throw.
+    punctuation = client.get("/api/assets", params=query({**filters, "q": "!!! \"\" ，"}, limit=200))
+    assert punctuation.status_code == 200
+    assert punctuation.json()["total"] == len(EXPECTED)
 
 
 def test_csv_export_matches_all_pages_and_escapes_fields(client, collection_ids):
