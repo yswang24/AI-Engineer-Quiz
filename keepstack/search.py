@@ -6,22 +6,39 @@ Three complementary modes over one catalog:
   * filter   - faceted structured filters (media type, tag, status, dates)
   * semantic - embedding cosine ranking ("natural language" / more-like-this)
 
-Facet counts are returned alongside results so the UI can render a live,
-drill-down sidebar.
+The keyword path also powers the quiz's combined-filter list and CSV export.
+Both callers share :func:`build_where` and :func:`fetch_rows`, so pagination,
+total counts and the exported set cannot drift apart.
+
+Every ORDER BY has a unique id tie-breaker. Without it SQLite may return rows
+with identical created_at in a different order between the count/page queries
+(or between two requests), which causes duplicates/missing items on page turns.
 """
 from __future__ import annotations
 
-from typing import Optional
+import re
+from typing import Iterable, Optional
 
 from . import ai
 from .db import get_conn
 
 SORTS = {
-    "newest": "a.created_at DESC",
-    "oldest": "a.created_at ASC",
-    "name": "a.title ASC",
-    "largest": "a.size DESC",
+    "newest": "a.created_at DESC, a.id DESC",
+    "oldest": "a.created_at ASC, a.id ASC",
+    "name": "a.title COLLATE NOCASE ASC, a.id ASC",
+    "largest": "a.size DESC, a.id DESC",
 }
+DEFAULT_SORT = "newest"
+
+# Legacy single-tag filter is kept for API compatibility; it has the same
+# semantics as one entry in include_tags.
+_INCLUDE_TAG_SQL = ("EXISTS (SELECT 1 FROM asset_tags at JOIN tags t ON t.id = at.tag_id "
+                    "WHERE at.asset_id = a.id AND lower(t.name) = ?)")
+_EXCLUDE_TAG_SQL = ("NOT EXISTS (SELECT 1 FROM asset_tags at JOIN tags t ON t.id = at.tag_id "
+                    "WHERE at.asset_id = a.id AND lower(t.name) = ?)")
+_COLLECTION_SQL = ("EXISTS (SELECT 1 FROM collection_assets ca "
+                   "WHERE ca.asset_id = a.id AND ca.collection_id = ?)")
+_FTS_SQL = "EXISTS (SELECT 1 FROM asset_fts WHERE asset_fts.rowid = a.id AND asset_fts MATCH ?)"
 
 
 def _fts_query(q: str) -> str:
@@ -30,61 +47,126 @@ def _fts_query(q: str) -> str:
     return " ".join(f'"{t}"*' for t in terms)
 
 
+def normalize_tags(values: Optional[Iterable[str]]) -> list[str]:
+    """Strip, lower-case and de-duplicate tag filters.
+
+    Query strings may arrive either as repeated parameters (``tag=a&tag=b``)
+    or as one comma-separated value (``tag=a,b``); both are accepted. Empty
+    entries are dropped, so a trailing comma does not create a phantom filter.
+    """
+    if not values:
+        return []
+    if isinstance(values, str):
+        values = [values]
+    out: list[str] = []
+    for value in values:
+        if value is None:
+            continue
+        for part in re.split(r"[,，]", str(value)):
+            name = part.strip().lower()
+            if name and name not in out:
+                out.append(name)
+    return out
+
+
+def build_where(
+    *,
+    q: str = "",
+    media_type: Optional[str] = None,
+    tag: Optional[str] = None,
+    include_tags: Optional[Iterable[str]] = None,
+    exclude_tags: Optional[Iterable[str]] = None,
+    collection_id: Optional[int] = None,
+    status: str = "active",
+) -> tuple[str, list]:
+    """Return the common WHERE clause (without WHERE) and bound parameters.
+
+    All conditions are ANDed. EXISTS subqueries avoid the row multiplication
+    and DISTINCT that plain joins would introduce with multiple tags.
+    """
+    clauses = ["a.status = ?"]
+    params: list = [status]
+
+    keyword = (q or "").strip()
+    if keyword:
+        clauses.append(_FTS_SQL)
+        params.append(_fts_query(keyword))
+    if media_type:
+        clauses.append("a.media_type = ?")
+        params.append(media_type)
+    include_names: list[str] = []
+    for name in normalize_tags([tag]) + normalize_tags(include_tags):
+        if name not in include_names:  # legacy tag may repeat an include_tag
+            include_names.append(name)
+            clauses.append(_INCLUDE_TAG_SQL)
+            params.append(name)
+    for name in normalize_tags(exclude_tags):
+        clauses.append(_EXCLUDE_TAG_SQL)
+        params.append(name)
+    if collection_id is not None:
+        clauses.append(_COLLECTION_SQL)
+        params.append(collection_id)
+
+    return " AND ".join(clauses), params
+
+
+def order_by(sort: str) -> str:
+    """Resolve a client sort name to a deterministic SQL ORDER BY."""
+    return SORTS.get(sort, SORTS[DEFAULT_SORT])
+
+
+def fetch_rows(filters: dict, limit: Optional[int] = None, offset: int = 0) -> tuple[list[dict], int]:
+    """Fetch matching asset rows and the full match count.
+
+    ``limit=None`` means no LIMIT (used by CSV export). Every query reads the
+    same filters, so list and export agree as long as the data does not change.
+    """
+    conn = get_conn()
+    where_sql, params = build_where(**{k: v for k, v in filters.items() if k != "sort"})
+    total = conn.execute(
+        f"SELECT COUNT(*) AS c FROM assets a WHERE {where_sql}", params
+    ).fetchone()["c"]
+    sql = f"SELECT a.* FROM assets a WHERE {where_sql} ORDER BY {order_by(filters.get('sort', DEFAULT_SORT))}"
+    query_params = list(params)
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        query_params.extend([limit, offset])
+    return [dict(r) for r in conn.execute(sql, query_params).fetchall()], total
+
+
 def search(
     *,
     q: str = "",
     media_type: Optional[str] = None,
     tag: Optional[str] = None,
+    include_tags: Optional[Iterable[str]] = None,
+    exclude_tags: Optional[Iterable[str]] = None,
     collection_id: Optional[int] = None,
     status: str = "active",
-    sort: str = "newest",
+    sort: str = DEFAULT_SORT,
     mode: str = "keyword",
     limit: int = 60,
     offset: int = 0,
 ) -> dict:
     conn = get_conn()
 
-    # Semantic mode ranks the candidate pool by embedding similarity.
+    # Semantic mode ranks the candidate pool by embedding similarity. It is a
+    # legacy mode and deliberately ignores the extra combined filters; the
+    # search page only exposes keyword mode.
     if mode == "semantic" and q.strip():
         return _semantic_search(q, media_type, status, limit, offset)
 
-    where = ["a.status = ?"]
-    params: list = [status]
-    join = ""
-
-    if q.strip():
-        join += " JOIN asset_fts f ON f.rowid = a.id"
-        where.append("asset_fts MATCH ?")
-        params.append(_fts_query(q))
-    if media_type:
-        where.append("a.media_type = ?")
-        params.append(media_type)
-    if tag:
-        join += (" JOIN asset_tags at ON at.asset_id = a.id"
-                 " JOIN tags t ON t.id = at.tag_id AND t.name = ?")
-        params.append(tag.lower())
-    if collection_id:
-        join += " JOIN collection_assets ca ON ca.asset_id = a.id AND ca.collection_id = ?"
-        params.append(collection_id)
-
-    where_sql = " AND ".join(where)
-    order = "bm25(asset_fts)" if q.strip() else SORTS.get(sort, SORTS["newest"])
-
-    total = conn.execute(
-        f"SELECT COUNT(*) AS c FROM assets a{join} WHERE {where_sql}", params
-    ).fetchone()["c"]
-
-    rows = conn.execute(
-        f"""SELECT a.* FROM assets a{join} WHERE {where_sql}
-            ORDER BY {order} LIMIT ? OFFSET ?""",
-        [*params, limit, offset],
-    ).fetchall()
-
+    filters = dict(q=q, media_type=media_type, tag=tag, include_tags=include_tags,
+                   exclude_tags=exclude_tags, collection_id=collection_id,
+                   status=status, sort=sort)
+    rows, total = fetch_rows(filters, limit=limit, offset=offset)
     return {
         "total": total,
-        "items": [_card(dict(r)) for r in rows],
+        "items": [_card(r) for r in rows],
         "facets": _facets(status),
         "mode": mode,
+        "limit": limit,
+        "offset": offset,
     }
 
 
@@ -103,7 +185,7 @@ def _semantic_search(q, media_type, status, limit, offset) -> dict:
     for r in rows:
         score = ai.cosine(qvec, ai.unpack_embedding(r["embedding"]))
         scored.append((score, r))
-    scored.sort(key=lambda x: x[0], reverse=True)
+    scored.sort(key=lambda x: (-x[0], x[1]["id"]))
     page = scored[offset:offset + limit]
     items = []
     for score, r in page:
@@ -124,7 +206,7 @@ def more_like(asset_id: int, limit: int = 12) -> list[dict]:
         (asset_id,),
     ).fetchall()
     scored = [(ai.cosine(bvec, ai.unpack_embedding(r["embedding"])), r) for r in rows]
-    scored.sort(key=lambda x: x[0], reverse=True)
+    scored.sort(key=lambda x: (-x[0], x[1]["id"]))
     out = []
     for score, r in scored[:limit]:
         card = _card(dict(r))

@@ -18,7 +18,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                PlainTextResponse, Response)
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, ingest, search, standards, storage, thumbnails
+from . import __version__, export, ingest, search, standards, storage, thumbnails
 from .audit import log, now_iso
 from .auth import (authenticate, hash_password, login_locked, make_token,
                    note_login_failure, note_login_success, role_at_least,
@@ -173,21 +173,60 @@ async def upload_assets(
     return {"created": results}
 
 
+def _asset_filters(q, media_type, tag, include_tags, exclude_tags, collection_id, sort) -> dict:
+    """Build the single filter dict shared by the list and CSV endpoints.
+
+    ``status`` is pinned to active for this assessment; callers cannot opt
+    into deleted assets through the combined-filter API.
+    """
+    return dict(q=q, media_type=media_type, tag=tag, include_tags=include_tags,
+                exclude_tags=exclude_tags, collection_id=collection_id,
+                status="active", sort=sort)
+
+
 @app.get("/api/assets")
 def list_assets(
     q: str = "",
     media_type: Optional[str] = None,
     tag: Optional[str] = None,
+    include_tags: list[str] = Query(default=[]),
+    exclude_tags: list[str] = Query(default=[]),
     collection_id: Optional[int] = None,
     status: str = "active",
     sort: str = "newest",
     mode: str = "keyword",
-    limit: int = Query(60, le=200),
-    offset: int = 0,
+    limit: int = Query(60, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     user: dict = Depends(require_user),
 ):
-    return search.search(q=q, media_type=media_type, tag=tag, collection_id=collection_id,
-                         status=status, sort=sort, mode=mode, limit=limit, offset=offset)
+    if mode == "semantic":
+        # Semantic search remains available via the API but is not exposed in
+        # the UI; it does not support combined filters (see SUBMISSION.md).
+        return search.search(q=q, media_type=media_type, status="active", sort=sort,
+                             mode=mode, limit=limit, offset=offset)
+    filters = _asset_filters(q, media_type, tag, include_tags, exclude_tags, collection_id, sort)
+    return search.search(**filters, mode=mode, limit=limit, offset=offset)
+
+
+@app.get("/api/assets/export.csv")
+def export_assets_csv(
+    q: str = "",
+    media_type: Optional[str] = None,
+    tag: Optional[str] = None,
+    include_tags: list[str] = Query(default=[]),
+    exclude_tags: list[str] = Query(default=[]),
+    collection_id: Optional[int] = None,
+    sort: str = "newest",
+    user: dict = Depends(require_user),
+):
+    """Export every matching active asset, not just the visible page."""
+    filters = _asset_filters(q, media_type, tag, include_tags, exclude_tags, collection_id, sort)
+    rows, _ = search.fetch_rows(filters, limit=None)
+    return Response(
+        content=export.build_csv(rows),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{export.download_filename()}"'},
+    )
 
 
 def _get_asset_or_404(uuid: str) -> dict:
