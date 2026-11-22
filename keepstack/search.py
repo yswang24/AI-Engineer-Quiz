@@ -140,6 +140,14 @@ def tags_by_asset(asset_ids: list[int]) -> dict[int, list[str]]:
     return {aid: sorted(names) for aid, names in out.items()}
 
 
+def count_matches(filters: dict) -> int:
+    """Count all matching rows without fetching them."""
+    where_sql, params = build_where(**{k: v for k, v in filters.items() if k != "sort"})
+    return get_conn().execute(
+        f"SELECT COUNT(*) AS c FROM assets a WHERE {where_sql}", params
+    ).fetchone()["c"]
+
+
 def fetch_rows(filters: dict, limit: Optional[int] = None, offset: int = 0,
                with_tags: bool = False) -> tuple[list[dict], int]:
     """Fetch matching asset rows and the full match count.
@@ -150,9 +158,7 @@ def fetch_rows(filters: dict, limit: Optional[int] = None, offset: int = 0,
     """
     conn = get_conn()
     where_sql, params = build_where(**{k: v for k, v in filters.items() if k != "sort"})
-    total = conn.execute(
-        f"SELECT COUNT(*) AS c FROM assets a WHERE {where_sql}", params
-    ).fetchone()["c"]
+    total = count_matches(filters)
     sql = f"SELECT a.* FROM assets a WHERE {where_sql} ORDER BY {order_by(filters.get('sort', DEFAULT_SORT))}"
     query_params = list(params)
     if limit is not None:

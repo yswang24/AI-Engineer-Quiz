@@ -189,6 +189,25 @@ def _validate_asset_query(*, status="active", sort="newest", mode="keyword",
         raise HTTPException(400, "Combined filters are not supported in semantic mode")
 
 
+def _filter_summary(q, media_type, tag, include_tags, exclude_tags, collection_id, sort) -> str:
+    """Short human-readable summary for the export audit entry."""
+    parts = []
+    if q and q.strip():
+        parts.append("q=" + q.strip()[:80])
+    if media_type:
+        parts.append("type=" + media_type)
+    if collection_id is not None:
+        parts.append("collection=" + str(collection_id))
+    if tag:
+        parts.append("tag=" + tag.lower())
+    if include_tags:
+        parts.append("include=" + ",".join(sorted(set(t.lower() for t in include_tags))))
+    if exclude_tags:
+        parts.append("exclude=" + ",".join(sorted(set(t.lower() for t in exclude_tags))))
+    parts.append("sort=" + sort)
+    return " ".join(parts)
+
+
 def _asset_filters(q, media_type, tag, include_tags, exclude_tags, collection_id, sort) -> dict:
     """Build the single filter dict shared by the list and CSV endpoints.
 
@@ -229,6 +248,7 @@ def list_assets(
 
 @app.get("/api/assets/export.csv")
 def export_assets_csv(
+    request: Request,
     q: str = "",
     media_type: Optional[str] = None,
     tag: Optional[str] = None,
@@ -242,6 +262,10 @@ def export_assets_csv(
     _validate_asset_query(sort=sort, tag=tag, include_tags=include_tags,
                           exclude_tags=exclude_tags, collection_id=collection_id)
     filters = _asset_filters(q, media_type, tag, include_tags, exclude_tags, collection_id, sort)
+    total = search.count_matches(filters)
+    log("asset.export", user=user, detail=f"{total} assets; " + _filter_summary(
+        q, media_type, tag, include_tags, exclude_tags, collection_id, sort),
+        ip=client_ip(request))
     return StreamingResponse(
         export.iter_csv(search.iter_rows(filters)),
         media_type="text/csv; charset=utf-8",

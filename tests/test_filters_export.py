@@ -195,6 +195,12 @@ def test_csv_export_matches_all_pages_and_escapes_fields(client, collection_ids)
     assert r.headers["content-type"].startswith("text/csv")
     assert "attachment;" in r.headers["content-disposition"]
 
+    entry = next(e for e in client.get("/api/audit", params={"limit": 10}).json()["entries"]
+                 if e["action"] == "asset.export")
+    assert "8 assets" in entry["detail"]
+    assert "include=approved,campaign" in entry["detail"]
+    assert "exclude=internal" in entry["detail"]
+
     text = r.content.decode("utf-8-sig")
     rows = list(csv.DictReader(io.StringIO(text)))
     assert [row["uuid"] for row in rows] == [i["uuid"] for i in listing["items"]]
