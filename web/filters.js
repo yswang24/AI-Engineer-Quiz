@@ -25,7 +25,26 @@
     return p;
   }
 
-  const api = { splitTags, queryParams };
+  const SORTS = ["newest", "oldest", "name", "largest"];
+
+  function fromLocationSearch(search) {
+    const p = new URLSearchParams(search || "");
+    const limit = Number(p.get("limit"));
+    const offset = Number(p.get("offset"));
+    const sort = p.get("sort");
+    return {
+      q: p.get("q") || "",
+      media: p.get("media_type") || null,
+      collection: p.get("collection_id") || null,
+      includeTags: splitTags(p.getAll("include_tags").join(",")),
+      excludeTags: splitTags(p.getAll("exclude_tags").join(",")),
+      sort: SORTS.includes(sort) ? sort : "newest",
+      limit: Number.isFinite(limit) && limit >= 1 && limit <= 200 ? limit : 12,
+      offset: Number.isFinite(offset) && offset >= 0 ? offset : 0,
+    };
+  }
+
+  const api = { splitTags, queryParams, fromLocationSearch };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.KeepstackFilters = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

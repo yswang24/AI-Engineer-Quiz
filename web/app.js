@@ -1,8 +1,7 @@
 /* Keepstack single-page client. Vanilla JS, no build step. */
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
-const { splitTags, queryParams } = KeepstackFilters;
-const query = (withPage = true) => queryParams(state, withPage);
+const { splitTags, queryParams, fromLocationSearch } = KeepstackFilters;
 const state = {
   token: localStorage.getItem("keepstack_token"), user: null,
   q: "", media: null, collection: null,
@@ -10,6 +9,11 @@ const state = {
   sort: "newest", limit: 12, offset: 0,
   total: 0, collections: [], requestSeq: 0,
 };
+Object.assign(state, fromLocationSearch(location.search));
+const query = (withPage = true) => queryParams(state, withPage);
+function syncUrl() {
+  history.replaceState(null, "", location.pathname + "?" + query().toString());
+}
 
 // ---------- API helper ----------
 async function api(path, opts = {}) {
@@ -145,6 +149,7 @@ async function loadCollections() {
 
 async function loadLibrary() {
   const seq = ++state.requestSeq;
+  syncUrl();
   try {
     const data = await api("/api/assets?" + query().toString());
     if (seq !== state.requestSeq) return;  // a newer filter change won

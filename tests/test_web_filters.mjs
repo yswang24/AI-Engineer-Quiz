@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const { splitTags, queryParams } = require("../web/filters.js");
+const { splitTags, queryParams, fromLocationSearch } = require("../web/filters.js");
 
 test("splitTags normalises, splits and de-duplicates", () => {
   assert.deepEqual(splitTags(" Approved, campaign，APPROVED , , internal "),
@@ -34,4 +34,28 @@ test("queryParams omits blank keyword and pagination for export", () => {
   assert.equal(p.has("limit"), false);
   assert.equal(p.has("offset"), false);
   assert.equal(p.get("sort"), "newest");
+});
+
+test("filter state survives a URL round-trip", () => {
+  const state = {
+    q: " harbor ", media: "image", collection: 7,
+    includeTags: ["approved", "campaign"], excludeTags: ["internal"],
+    sort: "oldest", limit: 3, offset: 6,
+  };
+  const parsed = fromLocationSearch(queryParams(state).toString());
+  assert.equal(parsed.q, "harbor");
+  assert.equal(parsed.collection, "7");
+  assert.deepEqual(parsed.includeTags, ["approved", "campaign"]);
+  assert.deepEqual(parsed.excludeTags, ["internal"]);
+  assert.equal(parsed.sort, "oldest");
+  assert.equal(parsed.limit, 3);
+  assert.equal(parsed.offset, 6);
+});
+
+test("URL parsing clamps illegal paging and sort values", () => {
+  const parsed = fromLocationSearch("sort=bogus&limit=999&offset=-5&include_tags=A，a");
+  assert.equal(parsed.sort, "newest");
+  assert.equal(parsed.limit, 12);
+  assert.equal(parsed.offset, 0);
+  assert.deepEqual(parsed.includeTags, ["a"]);
 });
