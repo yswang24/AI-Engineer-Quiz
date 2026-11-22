@@ -16,14 +16,27 @@ from .search import tags_by_asset
 
 FIELDNAMES = ("uuid", "title", "description", "filename", "media_type", "tags", "created_at")
 TAG_SEPARATOR = "; "
+_FORMULA_PREFIXES = ("=", "+", "-", "@")
 
 
-def _row_values(row: dict) -> list[str]:
+def neutralise_formula(value) -> str:
+    """Prefix spreadsheet formula triggers with an apostrophe.
+
+    The raw text remains present after the marker, so the export is still
+    readable; the trade-off is that such cells no longer evaluate on open.
+    """
+    text = "" if value is None else str(value)
+    if text.lstrip().startswith(_FORMULA_PREFIXES):
+        return "'" + text
+    return text
+
+
+def _row_values(row: dict, neutralise: bool = True) -> list[str]:
     tags = row.get("tags")
     if tags is None:
         tags = tags_by_asset([row["id"]]).get(row["id"], [])
     cell = tags if isinstance(tags, str) else TAG_SEPARATOR.join(sorted(tags))
-    return [
+    values = [
         row.get("uuid") or "",
         row.get("title") or "",
         row.get("description") or "",
@@ -32,6 +45,7 @@ def _row_values(row: dict) -> list[str]:
         cell,
         row.get("created_at") or "",
     ]
+    return [neutralise_formula(v) for v in values] if neutralise else values
 
 
 def _csv_line(values) -> str:
@@ -41,17 +55,17 @@ def _csv_line(values) -> str:
     return buf.getvalue()
 
 
-def iter_csv(rows):
+def iter_csv(rows, neutralise: bool = True):
     """Yield a BOM, the header, then one correctly quoted line per row."""
     yield "\ufeff"
     yield _csv_line(FIELDNAMES)
     for row in rows:
-        yield _csv_line(_row_values(row))
+        yield _csv_line(_row_values(row, neutralise=neutralise))
 
 
-def build_csv(rows: list[dict]) -> str:
+def build_csv(rows: list[dict], neutralise: bool = True) -> str:
     """Convenience wrapper for callers/tests that already hold all rows."""
-    return "".join(iter_csv(rows))
+    return "".join(iter_csv(rows, neutralise=neutralise))
 
 
 def download_filename() -> str:

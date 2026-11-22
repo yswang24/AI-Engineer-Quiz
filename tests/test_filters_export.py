@@ -40,7 +40,7 @@ db._local.conn = None
 
 import generate_fixture  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from keepstack import search  # noqa: E402
+from keepstack import export, search  # noqa: E402
 from keepstack.app import app  # noqa: E402
 
 EXPECTED = generate_fixture.EXPECTED_MATCHES
@@ -165,6 +165,26 @@ def test_streaming_rows_and_tags_are_chunked(client, collection_ids, monkeypatch
     assert [r["uuid"] for r in rows] == EXPECTED
     assert all("tags" in r for r in rows)
     assert rows[0]["tags"] == ["approved", "campaign"]
+
+
+def test_formula_neutralisation():
+    assert export.neutralise_formula("=1+1") == "'=1+1"
+    assert export.neutralise_formula(" +cmd") == "' +cmd"
+    assert export.neutralise_formula("Harbor (draft)") == "Harbor (draft)"
+    assert export.neutralise_formula(None) == ""
+
+
+def test_export_neutralises_formula_like_title(client, collection_ids):
+    filters = {**BASE, "collection_id": collection_ids["campaigns"]}
+    original = "Harbor (draft) [2026]"
+    try:
+        assert client.patch("/api/assets/fixture-013", json={"title": "=1+1"}).status_code == 200
+        response = client.get("/api/assets/export.csv", params=query(filters, limit=200))
+        row = next(r for r in csv.DictReader(io.StringIO(response.content.decode("utf-8-sig")))
+                   if r["uuid"] == "fixture-013")
+        assert row["title"] == "'=1+1"
+    finally:
+        client.patch("/api/assets/fixture-013", json={"title": original})
 
 
 def test_csv_export_matches_all_pages_and_escapes_fields(client, collection_ids):
