@@ -1,8 +1,13 @@
 /* Keepstack single-page client. Vanilla JS, no build step. */
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
-const state = { token: localStorage.getItem("keepstack_token"), user: null,
-  q: "", mode: "keyword", media: null, tag: null, sort: "newest", collection: null };
+const state = {
+  token: localStorage.getItem("keepstack_token"), user: null,
+  q: "", media: null, collection: null,
+  includeTags: [], excludeTags: [],
+  sort: "newest", limit: 12, offset: 0,
+  total: 0, collections: [], requestSeq: 0,
+};
 
 // ---------- API helper ----------
 async function api(path, opts = {}) {
@@ -35,11 +40,13 @@ $("#btn-logout").addEventListener("click", logout);
 function logout() { localStorage.removeItem("keepstack_token"); state.token = null; state.user = null;
   $("#app").classList.add("hidden"); $("#login").classList.remove("hidden"); }
 
-function enterApp() {
+async function enterApp() {
   $("#login").classList.add("hidden"); $("#app").classList.remove("hidden");
   $("#user-label").textContent = `${state.user.username} (${state.user.role})`;
   const isAdmin = state.user.role === "admin";
   $$(".admin-only").forEach(el => el.classList.toggle("hidden", !isAdmin));
+  syncFilterControls();
+  await loadCollections();
   loadLibrary();
 }
 
@@ -56,28 +63,142 @@ $$(".nav-item").forEach(btn => btn.addEventListener("click", () => {
   if (view === "audit") loadAudit();
 }));
 
-// ---------- library / search ----------
+// ---------- library / combined filters ----------
 let searchTimer;
-$("#search").addEventListener("input", (e) => { state.q = e.target.value; clearTimeout(searchTimer); searchTimer = setTimeout(loadLibrary, 250); });
-$("#search-mode").addEventListener("change", (e) => { state.mode = e.target.value; loadLibrary(); });
-$("#sort").addEventListener("change", (e) => { state.sort = e.target.value; loadLibrary(); });
-$("#active-filter").addEventListener("click", () => { state.media = null; state.tag = null; state.collection = null; loadLibrary(); });
+
+function splitTags(raw) {
+  return (raw || "").split(/[,，]/).map(s => s.trim().toLowerCase()).filter(Boolean)
+    .filter((v, i, a) => a.indexOf(v) === i);
+}
+
+function queryParams(withPage = true) {
+  const p = new URLSearchParams();
+  if (state.q.trim()) p.set("q", state.q.trim());
+  if (state.media) p.set("media_type", state.media);
+  if (state.collection) p.set("collection_id", state.collection);
+  state.includeTags.forEach(t => p.append("include_tags", t));
+  state.excludeTags.forEach(t => p.append("exclude_tags", t));
+  p.set("sort", state.sort);
+  if (withPage) {
+    p.set("limit", String(state.limit));
+    p.set("offset", String(state.offset));
+  }
+  return p;
+}
+
+function syncFilterControls() {
+  $("#search").value = state.q;
+  $("#filter-collection").value = state.collection || "";
+  $("#filter-media").value = state.media || "";
+  $("#filter-include").value = state.includeTags.join(", ");
+  $("#filter-exclude").value = state.excludeTags.join(", ");
+  $("#sort").value = state.sort;
+  $("#page-size").value = String(state.limit);
+}
+
+function applyFilters() {
+  state.q = $("#search").value.trim();
+  state.collection = $("#filter-collection").value || null;
+  state.media = $("#filter-media").value || null;
+  state.includeTags = splitTags($("#filter-include").value);
+  state.excludeTags = splitTags($("#filter-exclude").value);
+  state.offset = 0;
+  syncFilterControls();
+  loadLibrary();
+}
+
+function clearFilters() {
+  state.q = ""; state.collection = null; state.media = null;
+  state.includeTags = []; state.excludeTags = []; state.offset = 0;
+  syncFilterControls();
+  loadLibrary();
+}
+
+function removeFilter(kind, value) {
+  if (kind === "q") state.q = "";
+  if (kind === "collection") state.collection = null;
+  if (kind === "media") state.media = null;
+  if (kind === "include") state.includeTags = state.includeTags.filter(t => t !== value);
+  if (kind === "exclude") state.excludeTags = state.excludeTags.filter(t => t !== value);
+  state.offset = 0;
+  syncFilterControls();
+  loadLibrary();
+}
+
+$("#search").addEventListener("input", (e) => {
+  state.q = e.target.value;
+  state.offset = 0;
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(loadLibrary, 250);
+});
+$("#filter-collection").addEventListener("change", (e) => { state.collection = e.target.value || null; state.offset = 0; loadLibrary(); });
+$("#filter-media").addEventListener("change", (e) => { state.media = e.target.value || null; state.offset = 0; loadLibrary(); });
+["#filter-include", "#filter-exclude"].forEach(sel => {
+  $(sel).addEventListener("change", applyFilters);
+  $(sel).addEventListener("keydown", (e) => { if (e.key === "Enter") applyFilters(); });
+});
+$("#btn-apply").addEventListener("click", applyFilters);
+$("#btn-clear").addEventListener("click", clearFilters);
+$("#sort").addEventListener("change", (e) => { state.sort = e.target.value; state.offset = 0; loadLibrary(); });
+$("#page-size").addEventListener("change", (e) => { state.limit = Number(e.target.value); state.offset = 0; loadLibrary(); });
+$("#page-prev").addEventListener("click", () => { state.offset = Math.max(0, state.offset - state.limit); loadLibrary(); });
+$("#page-next").addEventListener("click", () => { state.offset += state.limit; loadLibrary(); });
+$("#btn-export").addEventListener("click", exportCsv);
+$("#active-filters").addEventListener("click", (e) => {
+  const chip = e.target.closest(".chip");
+  if (chip) removeFilter(chip.dataset.kind, chip.dataset.value);
+});
+
+async function loadCollections() {
+  try {
+    const data = await api("/api/collections");
+    state.collections = data.collections;
+    $("#filter-collection").innerHTML = '<option value="">All collections</option>' +
+      data.collections.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join("");
+    $("#filter-collection").value = state.collection || "";
+  } catch (err) {
+    toast("Failed to load collections: " + err.message, "err");
+  }
+}
 
 async function loadLibrary() {
-  const p = new URLSearchParams({ q: state.q, sort: state.sort, mode: state.mode, limit: "120" });
-  if (state.media) p.set("media_type", state.media);
-  if (state.tag) p.set("tag", state.tag);
-  if (state.collection) p.set("collection_id", state.collection);
-  const data = await api("/api/assets?" + p.toString());
-  renderFacets(data.facets);
-  renderGrid(data.items, data.total);
-  const filt = state.media || (state.tag ? "#" + state.tag : null) || (state.collection ? "collection" : null);
-  $("#active-filter").classList.toggle("hidden", !filt);
-  if (filt) $("#active-filter").textContent = filt;
+  const seq = ++state.requestSeq;
+  try {
+    const data = await api("/api/assets?" + queryParams().toString());
+    if (seq !== state.requestSeq) return;  // a newer filter change won
+    state.total = data.total;
+    if (state.offset > 0 && state.offset >= Math.max(data.total, 1)) {
+      state.offset = data.total ? Math.floor((data.total - 1) / state.limit) * state.limit : 0;
+      loadLibrary();
+      return;
+    }
+    renderFacets(data.facets);
+    renderGrid(data.items, data.total);
+    renderActiveFilters();
+    renderPagination(data.total);
+  } catch (err) {
+    if (seq !== state.requestSeq) return;
+    $("#grid").innerHTML = "";
+    $("#empty").textContent = "加载失败：" + err.message;
+    $("#empty").classList.remove("hidden");
+    $("#page-info").textContent = "Load failed";
+    toast("Failed to load results: " + err.message, "err");
+  }
+}
+
+function renderPagination(total) {
+  const pages = total ? Math.ceil(total / state.limit) : 1;
+  const current = total ? Math.floor(state.offset / state.limit) + 1 : 0;
+  $("#page-info").textContent = total
+    ? `Page ${current} / ${pages} · ${total} matches`
+    : "No matches";
+  $("#page-prev").disabled = state.offset <= 0;
+  $("#page-next").disabled = !total || state.offset + state.limit >= total;
 }
 
 function renderGrid(items, total) {
   $("#result-title").textContent = state.q ? `Results (${total})` : `Library (${total})`;
+  $("#empty").textContent = "No matching assets. Adjust the filters and try again.";
   $("#empty").classList.toggle("hidden", items.length > 0);
   $("#grid").innerHTML = items.map(a => `
     <div class="card" data-uuid="${a.uuid}">
@@ -85,18 +206,74 @@ function renderGrid(items, total) {
       <div class="meta">
         <span class="title" title="${esc(a.title)}">${esc(a.title)}</span>
         <span class="sub"><span class="badge">${a.media_type}</span><span>${fmtBytes(a.size)}</span></span>
+        <span class="sub"><span>Created</span><span>${esc((a.created_at || "").slice(0, 10))}</span></span>
       </div>
     </div>`).join("");
   $$("#grid .card").forEach(c => c.addEventListener("click", () => openAsset(c.dataset.uuid)));
 }
 
+function renderActiveFilters() {
+  const chips = [];
+  if (state.q.trim()) chips.push(["q", state.q.trim(), `Keyword: ${state.q.trim()}`]);
+  if (state.collection) {
+    const c = state.collections.find(c => String(c.id) === String(state.collection));
+    chips.push(["collection", state.collection, `Collection: ${c ? c.name : state.collection}`]);
+  }
+  if (state.media) chips.push(["media", state.media, `Type: ${state.media}`]);
+  state.includeTags.forEach(t => chips.push(["include", t, `Include: ${t}`]));
+  state.excludeTags.forEach(t => chips.push(["exclude", t, `Exclude: ${t}`]));
+  $("#active-filters").innerHTML = chips.map(([kind, value, label]) =>
+    `<span class="chip" data-kind="${kind}" data-value="${esc(value)}" title="Remove">${esc(label)}</span>`).join("");
+}
+
 function renderFacets(facets) {
-  $("#facet-media").innerHTML = (facets.media_types || []).map(m =>
-    `<li class="${state.media===m.value?'active':''}" data-media="${m.value}"><span>${m.value}</span><span class="count">${m.count}</span></li>`).join("");
-  $("#facet-tags").innerHTML = (facets.tags || []).slice(0, 18).map(t =>
-    `<li class="${state.tag===t.value?'active':''}" data-tag="${esc(t.value)}"><span>${esc(t.value)}</span><span class="count">${t.count}</span></li>`).join("");
-  $$("#facet-media li").forEach(li => li.addEventListener("click", () => { state.media = state.media===li.dataset.media?null:li.dataset.media; loadLibrary(); }));
-  $$("#facet-tags li").forEach(li => li.addEventListener("click", () => { state.tag = state.tag===li.dataset.tag?null:li.dataset.tag; loadLibrary(); }));
+  const media = facets.media_types || [];
+  const tags = facets.tags || [];
+  const previousMedia = $("#filter-media").value;
+  $("#filter-media").innerHTML = '<option value="">All types</option>' +
+    media.map(m => `<option value="${esc(m.value)}">${esc(m.value)}</option>`).join("");
+  $("#filter-media").value = state.media || previousMedia || "";
+  $("#tag-options").innerHTML = tags.map(t => `<option value="${esc(t.value)}"></option>`).join("");
+  $("#facet-media").innerHTML = media.map(m =>
+    `<li class="${state.media===m.value?'active':''}" data-media="${esc(m.value)}"><span>${esc(m.value)}</span><span class="count">${m.count}</span></li>`).join("");
+  $("#facet-tags").innerHTML = tags.slice(0, 18).map(t =>
+    `<li class="${state.includeTags.includes(t.value)?'active':''}" data-tag="${esc(t.value)}"><span>${esc(t.value)}</span><span class="count">${t.count}</span></li>`).join("");
+  $$("#facet-media li").forEach(li => li.addEventListener("click", () => {
+    state.media = state.media === li.dataset.media ? null : li.dataset.media;
+    state.offset = 0; syncFilterControls(); loadLibrary();
+  }));
+  $$("#facet-tags li").forEach(li => li.addEventListener("click", () => {
+    const tag = li.dataset.tag;
+    state.includeTags = state.includeTags.includes(tag)
+      ? state.includeTags.filter(t => t !== tag) : [...state.includeTags, tag];
+    state.offset = 0; syncFilterControls(); loadLibrary();
+  }));
+}
+
+async function exportCsv() {
+  const btn = $("#btn-export");
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = "Preparing...";
+  try {
+    const res = await fetch("/api/assets/export.csv?" + queryParams(false).toString(), {
+      headers: state.token ? { Authorization: "Bearer " + state.token } : {},
+    });
+    if (res.status === 401) { logout(); throw new Error("unauthorised"); }
+    if (!res.ok) throw new Error((await res.text()) || res.statusText);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const match = (res.headers.get("Content-Disposition") || "").match(/filename="([^"]+)"/);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = match ? match[1] : "keepstack-assets.csv";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast(`Exported ${state.total} matching asset(s)`);
+  } catch (err) {
+    toast("CSV export failed: " + err.message, "err");
+  } finally {
+    btn.disabled = false; btn.textContent = label;
+  }
 }
 
 // ---------- asset detail drawer ----------
@@ -173,12 +350,12 @@ async function openAsset(uuid) {
     $("#tag-add")?.addEventListener("keydown", async (e) => {
       if (e.key === "Enter" && e.target.value.trim()) {
         await api("/api/assets/"+uuid+"/tags", { json: { name: e.target.value.trim() } });
-        openAsset(uuid);
+        openAsset(uuid); loadLibrary();
       }
     });
     $$("#tag-row .rm").forEach(rm => rm.addEventListener("click", async () => {
       await api("/api/assets/"+uuid+"/tags/"+encodeURIComponent(rm.dataset.tag), { method: "DELETE" });
-      openAsset(uuid);
+      openAsset(uuid); loadLibrary();
     }));
     $("#d-share")?.addEventListener("click", async () => {
       const r = await api("/api/shares", { json: { target_type: "asset", target_id: a.id, permission: "download" } });
@@ -228,7 +405,8 @@ async function loadCollections() {
     `<div class="collection-card" data-id="${c.id}"><span class="n">${esc(c.name)}</span><span class="muted">${c.asset_count} assets</span><span class="muted">${esc(c.description||"")}</span></div>`).join("")
     || '<p class="muted">No collections yet.</p>';
   $$("#collection-list .collection-card").forEach(card => card.addEventListener("click", () => {
-    state.collection = card.dataset.id; state.media = null; state.tag = null;
+    state.collection = card.dataset.id; state.media = null; state.includeTags = []; state.excludeTags = [];
+    state.offset = 0; syncFilterControls();
     $$(".nav-item").forEach(b => b.classList.remove("active"));
     $('.nav-item[data-view="library"]').classList.add("active");
     $$(".view").forEach(v => v.classList.add("hidden")); $("#view-library").classList.remove("hidden");
