@@ -129,6 +129,9 @@ def test_sorting_and_stable_pagination(client, collection_ids):
     newest = client.get("/api/assets", params=query(filters, sort="newest", limit=200)).json()
     assert [i["uuid"] for i in oldest["items"]] == EXPECTED
     assert [i["uuid"] for i in newest["items"]] == list(reversed(EXPECTED))
+    # The three tied rows mix Z and +00:00 suffixes; id decides, not text sort.
+    tied = [i for i in oldest["items"] if i["created_at"].startswith("2026-03-02")]
+    assert [i["uuid"] for i in tied] == ["fixture-001", "fixture-003", "fixture-010"]
 
     # Three assets share created_at=2026-03-02T09:00:00Z; ids break the tie
     # consistently, so paging cannot repeat or skip them.

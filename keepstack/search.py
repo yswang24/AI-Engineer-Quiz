@@ -24,8 +24,10 @@ from . import ai
 from .db import get_conn
 
 SORTS = {
-    "newest": "a.created_at DESC, a.id DESC",
-    "oldest": "a.created_at ASC, a.id ASC",
+    # julianday() normalises ISO offsets (Z vs +00:00); the id tie-breaker
+    # keeps ordering deterministic. An expression index covers this sort.
+    "newest": "julianday(a.created_at) DESC, a.id DESC",
+    "oldest": "julianday(a.created_at) ASC, a.id ASC",
     "name": "a.title COLLATE NOCASE ASC, a.id ASC",
     "largest": "a.size DESC, a.id DESC",
 }

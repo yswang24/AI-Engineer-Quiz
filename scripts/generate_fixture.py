@@ -59,7 +59,9 @@ ASSETS = [
          description='Risk register, "high" priority\nneeds review',
          filename='harbor,risk "memo".txt',
          tags=("approved", "campaign"), collection="campaigns",
-         created_at="2026-03-02T09:00:00Z", media_type="document"),
+         # Same instant as fixture-001/010 but a different ISO offset suffix;
+         # julianday() must treat them as equal and let id break the tie.
+         created_at="2026-03-02T09:00:00+00:00", media_type="document"),
     dict(uuid="fixture-004", title="Harbor press kit (uppercase tags)",
          description="Press images for harbor opening", filename="harbor_press.jpg",
          tags=("Approved", "CAMPAIGN"), collection="campaigns",
