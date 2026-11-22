@@ -112,9 +112,13 @@ def test_combined_filters_include_exclude_collection_and_media(client, collectio
     r3 = client.get("/api/assets", params=query(only_docs, sort="oldest", limit=200))
     assert {i["uuid"] for i in r3.json()["items"]} == {"fixture-003", "fixture-011"}
 
-    # Deleted assets cannot be requested through the status parameter.
-    r4 = client.get("/api/assets", params=query(filters, status="deleted", limit=200))
-    assert r4.json()["total"] == len(EXPECTED)
+    # Unsupported options are rejected instead of silently ignored.
+    assert client.get("/api/assets", params=query(filters, status="deleted")).status_code == 400
+    assert client.get("/api/assets", params=query(filters, sort="bogus")).status_code == 400
+    assert client.get("/api/assets", params=query(filters, mode="bogus")).status_code == 400
+    assert client.get("/api/assets/export.csv", params=query(filters, sort="bogus")).status_code == 400
+    semantic = client.get("/api/assets", params=query(filters, mode="semantic"))
+    assert semantic.status_code == 400
 
 
 def test_sorting_and_stable_pagination(client, collection_ids):

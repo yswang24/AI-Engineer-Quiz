@@ -173,6 +173,22 @@ async def upload_assets(
     return {"created": results}
 
 
+def _validate_asset_query(*, status="active", sort="newest", mode="keyword",
+                          tag=None, include_tags=None, exclude_tags=None,
+                          collection_id=None) -> None:
+    """Reject unsupported options instead of silently ignoring them."""
+    if status != "active":
+        raise HTTPException(400, "Only active assets are available")
+    if sort not in search.SORTS:
+        raise HTTPException(400, f"Unknown sort: {sort}")
+    if mode not in ("keyword", "semantic"):
+        raise HTTPException(400, f"Unknown mode: {mode}")
+    if mode == "semantic" and any(
+        (tag, include_tags, exclude_tags, collection_id is not None)
+    ):
+        raise HTTPException(400, "Combined filters are not supported in semantic mode")
+
+
 def _asset_filters(q, media_type, tag, include_tags, exclude_tags, collection_id, sort) -> dict:
     """Build the single filter dict shared by the list and CSV endpoints.
 
@@ -199,6 +215,9 @@ def list_assets(
     offset: int = Query(0, ge=0),
     user: dict = Depends(require_user),
 ):
+    _validate_asset_query(status=status, sort=sort, mode=mode, tag=tag,
+                          include_tags=include_tags, exclude_tags=exclude_tags,
+                          collection_id=collection_id)
     if mode == "semantic":
         # Semantic search remains available via the API but is not exposed in
         # the UI; it does not support combined filters (see SUBMISSION.md).
@@ -220,6 +239,8 @@ def export_assets_csv(
     user: dict = Depends(require_user),
 ):
     """Export every matching active asset, not just the visible page."""
+    _validate_asset_query(sort=sort, tag=tag, include_tags=include_tags,
+                          exclude_tags=exclude_tags, collection_id=collection_id)
     filters = _asset_filters(q, media_type, tag, include_tags, exclude_tags, collection_id, sort)
     rows, _ = search.fetch_rows(filters, limit=None)
     return Response(
